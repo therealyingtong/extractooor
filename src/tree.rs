@@ -41,7 +41,7 @@ impl<
         let p = p.next_round(&tr);
 
         if depth == MU { 
-            let verification_result = V::verify(instance, tr);
+            let verification_result: bool = V::verify(instance, tr);
 
             if verification_result {
                 return None
@@ -67,6 +67,8 @@ impl<
                     while tr_result == None {
                         tr_result = Self::traverse(depth + 1, p, tr.append_verifer_message(Pr::VerifierMessage::rand(&mut rng)), rng, instance);
                     }
+
+                    accepting_transcripts.push(tr_result)
                 }
             }
         }
