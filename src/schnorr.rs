@@ -1,7 +1,9 @@
+use std::marker::PhantomData;
+
 use crate::protocol;
 use crate::protocol::{PartialTranscript as _, Transcript as _};
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::FftField;
+use ark_ff::{FftField, Field};
 use ark_std::{rand::RngCore, UniformRand};
 use rand::SeedableRng;
 
@@ -59,6 +61,16 @@ struct PartialTranscript<G: AffineRepr> {
     verifier_messages: Vec<VerifierMessage<G::ScalarField>>,
 }
 
+impl<G: AffineRepr> Default for PartialTranscript<G> {
+    fn default() -> Self {
+        Self {
+            round_index: 0,
+            prover_messages: vec![],
+            verifier_messages: vec![],
+        }
+    }
+}
+
 impl<G: AffineRepr> protocol::PartialTranscript for PartialTranscript<G> {
     type ProverMessage = ProverMessage<G>;
     type VerifierMessage = VerifierMessage<G::ScalarField>;
@@ -87,7 +99,7 @@ impl<G: AffineRepr> protocol::PartialTranscript for PartialTranscript<G> {
         let mut prover_messages = self.prover_messages.clone();
         prover_messages.push(prover_message);
         Self {
-            round_index: self.round_index + 1,
+            round_index: self.round_index,
             prover_messages,
             verifier_messages: self.verifier_messages.clone(),
         }
@@ -112,6 +124,19 @@ impl<G: AffineRepr> protocol::Transcript for Transcript<G> {
     }
 }
 
+impl<G: AffineRepr> TryFrom<PartialTranscript<G>> for Transcript<G> {
+    type Error = ();
+
+    fn try_from(value: PartialTranscript<G>) -> Result<Self, Self::Error> {
+        // FIXME check correctness
+
+        Ok(Self {
+            prover_messages: value.prover_messages,
+            verifier_messages: value.verifier_messages,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Prover<G: AffineRepr> {
     x: G::ScalarField,
@@ -119,7 +144,7 @@ struct Prover<G: AffineRepr> {
 }
 
 impl<G: AffineRepr> Prover<G> {
-    fn first_round<R: RngCore + SeedableRng>(&mut self, rng: &mut R) -> ProverMessage<G> {
+    fn first_round<R: RngCore>(&mut self, rng: &mut R) -> ProverMessage<G> {
         let r = G::ScalarField::rand(rng);
         self.r = Some(r);
         let g = G::generator();
@@ -143,7 +168,7 @@ impl<G: AffineRepr> protocol::Prover for Prover<G> {
         self.x
     }
 
-    fn next_round<R: RngCore + SeedableRng>(
+    fn next_round<R: RngCore>(
         &mut self,
         tr: &PartialTranscript<G>,
         rng: &mut R,
@@ -156,20 +181,6 @@ impl<G: AffineRepr> protocol::Prover for Prover<G> {
             panic!("Round index cannot exceed 1")
         }
     }
-
-    // fn next_prover(prev: Self, tr: Self::PartialTranscript) -> Self {
-    //     let mut tr = tr.clone();
-    //     let mut rng = R::from_rng(prev.rng);
-    //     let verifier_message = G::ScalarField::rand(&mut rng);
-    //     let partial_transcript = tr.append_verifer_message(verifier_message);
-
-    //     Self {
-    //         r: prev.r,
-    //         x: prev.x,
-    //         rng,
-    //         partial_transcript,
-    //     }
-    // }
 }
 
 struct Verifier<G: AffineRepr> {
@@ -193,12 +204,69 @@ impl<G: AffineRepr> protocol::Verifier for Verifier<G> {
     }
 }
 
+struct Extractor<G: AffineRepr> {
+    _marker: PhantomData<G>,
+}
+
+impl<G: AffineRepr> protocol::Extractor for Extractor<G> {
+    type Witness = G::ScalarField;
+    type PartialTranscript = PartialTranscript<G>;
+
+    fn extract(trs: &Vec<Self::PartialTranscript>) -> Self::Witness {
+        assert_eq!(trs.len(), 2);
+        let c1 = trs[0].verifier_messages()[0].0;
+        println!("c1: {}", c1);
+        let c2 = trs[1].verifier_messages()[0].0;
+        println!("c2: {}", c2);
+
+        let z1 = trs[0].prover_messages()[1].z();
+        println!("z1: {}", z1);
+        let z2 = trs[1].prover_messages()[1].z();
+        println!("z2: {}", z2);
+
+        println!("z1 - z2: {}", z1 - z2);
+        println!(
+            "(c1 - c2).inverse().unwrap(): {}",
+            (c1 - c2).inverse().unwrap()
+        );
+
+        let extracted_x = (z1 - z2) * (c1 - c2).inverse().unwrap();
+        println!("extracted_x: {}", extracted_x);
+
+        extracted_x
+    }
+}
+
+struct Protocol<G: AffineRepr>(PhantomData<G>);
+
+impl<G: AffineRepr>
+    protocol::Protocol<
+        2,
+        SCHNORR_MU,
+        G::ScalarField,
+        G,
+        PartialTranscript<G>,
+        Transcript<G>,
+        Prover<G>,
+        Verifier<G>,
+        Extractor<G>,
+    > for Protocol<G>
+{
+}
+
 #[cfg(test)]
 mod schnorr_extractor {
+    use std::ops::Mul;
+
     use ark_bn254::{Fr as F, G1Affine};
     use ark_ec::AffineRepr;
     use ark_ff::Field;
     use ark_std::{test_rng, UniformRand};
+    // use crate::tree::Tree;
+
+    use crate::protocol::Protocol as _;
+
+    use super::*;
 
     #[test]
     fn extract() {
@@ -235,5 +303,14 @@ mod schnorr_extractor {
         // x = (z_1 - z_2) / (c_1 - c_2)
         let extracted_x = (z_1 - z_2) * (c_1 - c_2).inverse().unwrap();
         assert_eq!(x, extracted_x);
+    }
+
+    #[test]
+    fn schnorr() {
+        let mut rng = test_rng();
+        let x = F::from(100u64);
+        let instance = G1Affine::generator().mul(x).into_affine();
+        let prover = Prover::<G1Affine> { x, r: None };
+        Protocol::traverse(0, prover, PartialTranscript::default(), &mut rng, &instance);
     }
 }
