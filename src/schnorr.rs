@@ -18,7 +18,7 @@ Schnorr
 
 const SCHNORR_MU: usize = 1;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ProverMessage<G: AffineRepr> {
     /// U = [r]G
     U(G),
@@ -44,11 +44,15 @@ impl<G: AffineRepr> ProverMessage<G> {
 
 impl<G: AffineRepr> protocol::ProverMessage for ProverMessage<G> {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VerifierMessage<F: FftField>(F);
-impl<F: FftField> protocol::VerifierMessage for VerifierMessage<F> {}
+impl<F: FftField> protocol::VerifierMessage for VerifierMessage<F> {
+    fn rand<R: RngCore>(rng: &mut R) -> Self {
+        Self(F::rand(rng))
+    }
+}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PartialTranscript<G: AffineRepr> {
     round_index: usize,
     prover_messages: Vec<ProverMessage<G>>,
@@ -69,7 +73,7 @@ impl<G: AffineRepr> protocol::PartialTranscript for PartialTranscript<G> {
         self.verifier_messages.clone()
     }
 
-    fn append_verifer_message(&self, verifier_message: Self::VerifierMessage) -> Self {
+    fn append_verifier_message(&self, verifier_message: Self::VerifierMessage) -> Self {
         let mut verifier_messages = self.verifier_messages.clone();
         verifier_messages.push(verifier_message);
         Self {
@@ -78,8 +82,19 @@ impl<G: AffineRepr> protocol::PartialTranscript for PartialTranscript<G> {
             verifier_messages,
         }
     }
+
+    fn append_prover_message(&self, prover_message: Self::ProverMessage) -> Self {
+        let mut prover_messages = self.prover_messages.clone();
+        prover_messages.push(prover_message);
+        Self {
+            round_index: self.round_index + 1,
+            prover_messages,
+            verifier_messages: self.verifier_messages.clone(),
+        }
+    }
 }
 
+#[derive(Debug)]
 struct Transcript<G: AffineRepr> {
     prover_messages: Vec<ProverMessage<G>>,
     verifier_messages: Vec<VerifierMessage<G::ScalarField>>,
@@ -97,15 +112,15 @@ impl<G: AffineRepr> protocol::Transcript for Transcript<G> {
     }
 }
 
-struct Prover<G: AffineRepr, R: RngCore + SeedableRng> {
+#[derive(Clone)]
+struct Prover<G: AffineRepr> {
     x: G::ScalarField,
     r: Option<G::ScalarField>,
-    rng: R,
 }
 
-impl<G: AffineRepr, R: RngCore + SeedableRng> Prover<G, R> {
-    fn first_round(&mut self) -> ProverMessage<G> {
-        let r = G::ScalarField::rand(&mut self.rng);
+impl<G: AffineRepr> Prover<G> {
+    fn first_round<R: RngCore + SeedableRng>(&mut self, rng: &mut R) -> ProverMessage<G> {
+        let r = G::ScalarField::rand(rng);
         self.r = Some(r);
         let g = G::generator();
 
@@ -120,7 +135,7 @@ impl<G: AffineRepr, R: RngCore + SeedableRng> Prover<G, R> {
     }
 }
 
-impl<G: AffineRepr, R: RngCore + SeedableRng> protocol::Prover for Prover<G, R> {
+impl<G: AffineRepr> protocol::Prover for Prover<G> {
     type Witness = G::ScalarField;
     type ProverMessage = ProverMessage<G>;
     type PartialTranscript = PartialTranscript<G>;
@@ -128,9 +143,13 @@ impl<G: AffineRepr, R: RngCore + SeedableRng> protocol::Prover for Prover<G, R> 
         self.x
     }
 
-    fn next_round(&mut self, tr: &PartialTranscript<G>) -> Self::ProverMessage {
+    fn next_round<R: RngCore + SeedableRng>(
+        &mut self,
+        tr: &PartialTranscript<G>,
+        rng: &mut R,
+    ) -> Self::ProverMessage {
         if tr.round_index() == 0 {
-            self.first_round()
+            self.first_round(rng)
         } else if tr.round_index() == 1 {
             self.second_round(&tr)
         } else {
@@ -160,17 +179,17 @@ struct Verifier<G: AffineRepr> {
 
 impl<G: AffineRepr> protocol::Verifier for Verifier<G> {
     type VerifierMessage = VerifierMessage<G::ScalarField>;
-
+    type Instance = G;
     type Transcript = Transcript<G>;
 
-    fn verify(&self, tr: Self::Transcript) -> bool {
+    fn verify(instance: &Self::Instance, tr: &Self::Transcript) -> bool {
         let g = G::generator();
         let u = tr.prover_messages()[0].u();
         let z = tr.prover_messages()[1].z();
         let c = tr.verifier_messages()[0].0;
 
         // [z]G ?= U + [c]H
-        g.mul(z) == u.into() + self.h.mul(c)
+        g.mul(z) == u.into() + instance.mul(c)
     }
 }
 

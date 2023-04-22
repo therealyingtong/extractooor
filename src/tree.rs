@@ -1,10 +1,16 @@
 use std::marker::PhantomData;
 
-use rand::RngCore;
+use rand::{RngCore, SeedableRng};
 
-use crate::protocol::{PartialTranscript, Prover, Transcript, Verifier, Extractor, Protocol};
+use crate::protocol::{
+    Extractor, PartialTranscript, Protocol, Prover, Transcript, Verifier, VerifierMessage,
+};
 
-struct TraversalResult<T: Transcript>(T);
+#[derive(Debug, PartialEq, Clone)]
+pub enum TraversalResult {
+    Abort,
+    Success,
+}
 
 struct Node<
     const WIDTH: usize,
@@ -12,84 +18,95 @@ struct Node<
     Witness,
     Instance,
     PTr: PartialTranscript,
-    Tr: Transcript + TryFrom<PTr>,
-    P: Prover<Witness = Witness, PartialTranscript = PTr>,
+    Tr: Transcript<ProverMessage = PTr::ProverMessage> + TryFrom<PTr>,
+    P: Prover<Witness = Witness, PartialTranscript = PTr, ProverMessage = Tr::ProverMessage>,
     V: Verifier<Transcript = Tr, Instance = Instance>,
     E: Extractor<Witness = Witness, Transcript = Tr>,
-    Pr: Protocol<
-        MU, Witness, Instance, PTr, Tr, P, V, E
-    >
+    Pr: Protocol<MU, Witness, Instance, PTr, Tr, P, V, E>,
 >(PhantomData<(P, V, E, Pr, PTr)>);
 
 impl<
-    const WIDTH: usize,
-    const MU: usize,
-    Witness,
-    Instance,
-    PTr: PartialTranscript,
-    Tr: Transcript + TryFrom<PTr>,
-    P: Prover<Witness = Witness, PartialTranscript = PTr>,
-    V: Verifier<Transcript = Tr, Instance = Instance>,
-    E: Extractor<Witness = Witness, Transcript = Tr>,
-    Pr: Protocol<
-        MU, Witness, Instance, PTr, Tr, P, V, E
-    >
-> Node<WIDTH, MU, Witness, Instance, PTr, Tr, P, V, E, Pr>
+        const WIDTH: usize,
+        const MU: usize,
+        Witness,
+        Instance,
+        PTr: PartialTranscript,
+        Tr: Transcript<ProverMessage = PTr::ProverMessage> + TryFrom<PTr>,
+        P: Prover<Witness = Witness, PartialTranscript = PTr, ProverMessage = Tr::ProverMessage>,
+        V: Verifier<Transcript = Tr, Instance = Instance>,
+        E: Extractor<Witness = Witness, Transcript = Tr>,
+        Pr: Protocol<MU, Witness, Instance, PTr, Tr, P, V, E>,
+    > Node<WIDTH, MU, Witness, Instance, PTr, Tr, P, V, E, Pr>
+where
+    <Tr as TryFrom<PTr>>::Error: std::fmt::Debug,
 {
-    pub fn traverse<R: RngCore>(depth: usize, p: P, tr: PTr, rng: &mut R, instance: &Instance) -> Option<Tr> {
+    pub fn traverse<R: RngCore + SeedableRng>(
+        depth: usize,
+        p: P,
+        tr: PTr,
+        rng: &mut R,
+        instance: &Instance,
+    ) -> TraversalResult {
         let mut p = p.clone();
-        let p = p.next_round(&tr);
+        let prover_message = p.next_round(&tr, rng);
 
-        if depth == MU { 
-            let verification_result: bool = V::verify(instance, tr);
+        if depth == MU {
+            let verification_result: bool = V::verify(instance, &tr.try_into().unwrap());
 
             if verification_result {
-                return None
+                return TraversalResult::Abort;
             } else {
-                return Some(tr)
+                return TraversalResult::Success;
             }
         }
 
+        let tr = tr.append_prover_message(prover_message);
         let mut accepting_transcripts = Vec::<PTr>::with_capacity(WIDTH);
 
-        for i in 0..WIDTH {
-            let mut tr_result = Self::traverse(depth + 1, p, tr.append_verifer_message(Pr::VerifierMessage::rand(&mut rng)), rng, instance);
+        while accepting_transcripts.len() < WIDTH {
+            let c: PTr::VerifierMessage = VerifierMessage::rand(rng);
+            let tr_result: TraversalResult = Self::traverse(
+                depth + 1,
+                p.clone(),
+                tr.append_verifier_message(c.clone()),
+                rng,
+                instance,
+            );
 
-            match i {
-                0 => {
-                    if let tr_result = Some(tr_result) {
-                        accepting_transcripts.push(tr_result)
-                    } else {
-                        return None;
-                    }
+            // leftmost child
+            if accepting_transcripts.len() == 0 {
+                if tr_result == TraversalResult::Success {
+                    accepting_transcripts.push(tr.append_verifier_message(c.clone()));
+                } else {
+                    return TraversalResult::Abort;
                 }
-                _ => {
-                    while tr_result == None {
-                        tr_result = Self::traverse(depth + 1, p, tr.append_verifer_message(Pr::VerifierMessage::rand(&mut rng)), rng, instance);
-                    }
-
-                    accepting_transcripts.push(tr_result)
+            // any other child
+            } else {
+                if tr_result == TraversalResult::Success {
+                    accepting_transcripts.push(tr.append_verifier_message(c.clone()));
                 }
             }
         }
+
+        TraversalResult::Success
         /*
-            // for i = 0; i < widht; i++ {
-                tr <- call traverse with (prover.clone, append new random thing)
-                if i = 0 and tr == abort { 
-                    abort 
-                }
-                if i > 0 and tr == abort {
-                    tr <- call leaf with different randomness again 
-                }
-                else { 
-                    push tr to array of accepting 
-                }
-            }
-        
-            given array of accepting 
-                - invoke extractor 
-                - extract the witness 
-         */
-        todo!()
+           // for i = 0; i < widht; i++ {
+               tr <- call traverse with (prover.clone, append new random thing)
+               if i = 0 and tr == abort {
+                   abort
+               }
+               if i > 0 and tr == abort {
+                   tr <- call leaf with different randomness again
+               }
+               else {
+                   push tr to array of accepting
+               }
+           }
+
+           given array of accepting
+               - invoke extractor
+               - extract the witness
+        */
+        // todo!()
     }
 }
