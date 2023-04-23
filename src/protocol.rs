@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
 
 pub trait ProverMessage: Clone + Debug {}
 pub trait VerifierMessage: Clone + Debug {
@@ -20,17 +20,23 @@ pub trait Prover: Clone {
     // fn clone(&self, seed: u64) -> Self;
 }
 
-pub trait Verifier {
+pub trait Verifier: Clone {
     type Instance;
     type VerifierMessage: VerifierMessage;
     type Transcript: Transcript<VerifierMessage = Self::VerifierMessage>;
-    fn verify(instance: &Self::Instance, tr: &Self::Transcript) -> bool;
+    type PartialTranscript: PartialTranscript<VerifierMessage = Self::VerifierMessage>;
+    fn verify(&self, instance: &Self::Instance, tr: &Self::Transcript) -> bool;
+    fn next_round<R: RngCore>(
+        &mut self,
+        tr: &Self::PartialTranscript,
+        rng: &mut R,
+    );
 }
 
 pub trait Extractor {
     type Witness;
     type PartialTranscript: PartialTranscript;
-    fn extract(tr: &Vec<Self::PartialTranscript>) -> Self::Witness;
+    fn extract(tr: &Vec<Self::PartialTranscript>, prev_extraction_witnesses: &Vec<Self::Witness>) -> Self::Witness;
 }
 
 pub trait PartialTranscript: Clone + Debug {
@@ -67,7 +73,7 @@ pub trait Protocol<
     PTr: PartialTranscript,
     Tr: Transcript<ProverMessage = PTr::ProverMessage> + TryFrom<PTr>,
     P: Prover<Witness = Witness, PartialTranscript = PTr, ProverMessage = PTr::ProverMessage>,
-    V: Verifier<Transcript = Tr, Instance = Instance>,
+    V: Verifier<Transcript = Tr, PartialTranscript = PTr, Instance = Instance>,
     E: Extractor<Witness = Witness, PartialTranscript = PTr>,
 > where
     <Tr as TryFrom<PTr>>::Error: std::fmt::Debug,
@@ -75,31 +81,42 @@ pub trait Protocol<
     fn traverse<R: RngCore>(
         depth: usize,
         p: P,
+        v: V,
         tr: PTr,
         rng: &mut R,
         instance: &Instance,
-    ) -> Option<PTr> {
+    ) -> Option<Witness> {
+        println!("WE ARE IN RECURSIVE STEP WITH VECTOR OF LEN: {:?}", p.witness());
         let mut p = p.clone();
+        let mut v = v.clone();
+        v.next_round(&tr, rng);
+        println!("SURVIVED V");
         let prover_message = p.next_round(&tr, rng);
+        println!("SURVIVED P");
+
         let tr = tr.append_prover_message(prover_message);
 
         if depth == MU {
-            let verification_result: bool = V::verify(instance, &tr.clone().try_into().unwrap());
+            println!("WE ARE IN THE LEAF!!!!");
+            let verification_result: bool = v.verify(instance, &tr.clone().try_into().unwrap());
 
             if verification_result {
-                return Some(tr.clone());
+                return Some(p.witness());
             } else {
                 return None;
             }
         }
 
         let mut accepting_transcripts = Vec::<PTr>::with_capacity(WIDTH);
+        let mut accepting_witnesses = Vec::<Witness>::with_capacity(WIDTH);
+
 
         while accepting_transcripts.len() < WIDTH {
             let c: PTr::VerifierMessage = VerifierMessage::rand(rng);
             let tr_result = Self::traverse(
                 depth + 1,
                 p.clone(),
+                v.clone(),
                 tr.append_verifier_message(c.clone()),
                 rng,
                 instance,
@@ -107,20 +124,25 @@ pub trait Protocol<
 
             // leftmost child
             if accepting_transcripts.len() == 0 {
-                if let Some(tr) = tr_result {
+                if let Some(u) = tr_result {
                     accepting_transcripts.push(tr.append_verifier_message(c.clone()));
+                    accepting_witnesses.push(u);
                 } else {
                     return None;
                 }
             // any other child
             } else {
-                if let Some(tr) = tr_result {
+                if let Some(u) = tr_result {
                     accepting_transcripts.push(tr.append_verifier_message(c.clone()));
+                    accepting_witnesses.push(u);
                 }
             }
         }
 
-        let extracted_witness: Witness = E::extract(&accepting_transcripts);
+        let extracted_witness: Witness = E::extract(
+            &accepting_transcripts,
+            &accepting_witnesses
+        );
 
         // given array of accepting transcripts
         // extraction always succeeds
@@ -130,6 +152,6 @@ pub trait Protocol<
             panic!("Protocol does not accept from array of accepting transcripts");
         }
 
-        Some(accepting_transcripts[0].clone())
+        Some(extracted_witness)
     }
 }
